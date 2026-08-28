@@ -224,6 +224,14 @@ Here is something to try:
 * "Need some destination ideas for the Americas"
 * After interacting with the agents for a while, you may ask: "Go ahead to planning".
 
+#### Bidi-streaming (voice/video)
+
+`adk web` also offers a mic/camera "streaming" mode built on ADK's bidi-streaming
+(Live API) support. This requires a Live-capable model — the default
+`gemini-2.5-flash` does **not** support it and the session will fail to connect.
+Set `GOOGLE_GENAI_MODEL` in `.env` to a Live model before using this mode, e.g.
+`gemini-live-2.5-flash-preview` for the ML Dev (API key) backend, or
+`gemini-2.0-flash-live-preview-04-09` for the Vertex AI backend.
 
 ### Programmatic Access
 
