@@ -1,17 +1,20 @@
-"""Week 2 acceptance harness for the travel_concierge voice bridge.
+"""Acceptance harness for the travel_concierge voice bridge.
 
-Drives N sample questions end-to-end through the bridge's WebSocket and checks
-two things per question:
+Drives sample questions end-to-end through the bridge's WebSocket and checks two
+things per question:
 
   1. ROUTING  - did it reach the expected sub-agent?
   2. LATENCY  - how long did the round trip take?
 
 Two input modes:
 
-  text   (default)  send the question as text, exercising
+  text   (default)  sends {"type": "text", ...}, exercising
                     transcript -> travel_concierge -> response
-  audio             send a WAV file as PCM, exercising the full
+  audio             streams a WAV as binary PCM frames, exercising the full
                     mic -> STT -> transcript -> travel_concierge path
+
+It speaks bidi-demo's protocol, so it is also a way to inspect the raw ADK
+event stream the frontend sees.
 
 Usage:
     uv run python harness.py                       # text mode, built-in questions
@@ -26,7 +29,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import json
 import statistics
 import sys
@@ -36,8 +38,7 @@ from pathlib import Path
 
 import websockets
 
-# (question, sub-agent we expect to end up handling it)
-# root_agent answering directly is acceptable for greetings/chitchat.
+# (question, sub-agent expected to handle it)
 QUESTIONS: list[tuple[str, str | None]] = [
     ("Need some destination ideas for the Americas", "inspiration_agent"),
     ("What are some fun things to do in Seattle?", "inspiration_agent"),
@@ -67,26 +68,52 @@ def _read_wav_as_pcm(path: Path) -> bytes:
         return wav.readframes(wav.getnframes())
 
 
-async def _collect_response(ws, timeout: float) -> dict | None:
-    """Read until a response/error arrives, returning the parsed message."""
+async def _collect_turn(ws, timeout: float) -> dict:
+    """Read ADK events until turnComplete, folding them into one result."""
     deadline = time.monotonic() + timeout
-    transcript = None
-    while time.monotonic() < deadline:
+    out: dict = {"agents": [], "transfers": [], "tools": [], "reply": "", "heard": ""}
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            out["timeout"] = True
+            return out
         try:
-            raw = await asyncio.wait_for(ws.recv(), timeout=deadline - time.monotonic())
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
         except TimeoutError:
-            return None
-        msg = json.loads(raw)
-        kind = msg.get("type")
-        if kind == "transcript":
-            transcript = msg.get("text")
-        elif kind == "stt_unavailable":
-            print(f"    ! STT unavailable: {msg.get('text', '')[:120]}")
-        elif kind in ("response", "error"):
-            if transcript:
-                msg["heard"] = transcript
-            return msg
-    return None
+            out["timeout"] = True
+            return out
+
+        event = json.loads(raw)
+
+        # The bridge's two non-Event messages.
+        if "error" in event:
+            out["error"] = event["error"]
+            return out
+        if "sttUnavailable" in event:
+            print(f"    ! STT unavailable: {event['sttUnavailable'][:120]}")
+            continue
+
+        author = event.get("author")
+        if author and author not in out["agents"]:
+            out["agents"].append(author)
+
+        transfer = (event.get("actions") or {}).get("transferToAgent")
+        if transfer:
+            out["transfers"].append(transfer)
+
+        transcription = event.get("inputTranscription") or {}
+        if transcription.get("text"):
+            out["heard"] += transcription["text"]
+
+        for part in (event.get("content") or {}).get("parts") or []:
+            if part.get("text"):
+                out["reply"] += part["text"]
+            call = part.get("functionCall") or {}
+            if call.get("name"):
+                out["tools"].append(call["name"])
+
+        if event.get("turnComplete"):
+            return out
 
 
 async def run_question(
@@ -96,50 +123,45 @@ async def run_question(
     """Run one question through a fresh session; return a result row."""
     result: dict = {"question": question, "expected": expected}
     started = time.monotonic()
+    name = f"harness-{idx}"
     try:
-        async with websockets.connect(f"{url}/ws/harness-{idx}") as ws:
+        async with websockets.connect(f"{url}/ws/{name}/{name}") as ws:
             if audio is not None:
                 pcm = _read_wav_as_pcm(audio)
                 step = int(SAMPLE_RATE * 2 * CHUNK_MS / 1000)
                 for pos in range(0, len(pcm), step):
-                    await ws.send(json.dumps({
-                        "mime_type": f"audio/pcm;rate={SAMPLE_RATE}",
-                        "data": base64.b64encode(pcm[pos:pos + step]).decode(),
-                    }))
+                    await ws.send(pcm[pos:pos + step])  # binary frame
                     await asyncio.sleep(CHUNK_MS / 1000)
             else:
-                await ws.send(json.dumps({"mime_type": "text/plain", "data": question}))
+                await ws.send(json.dumps({"type": "text", "text": question}))
 
-            msg = await _collect_response(ws, timeout)
+            turn = await _collect_turn(ws, timeout)
     except Exception as exc:
-        result.update(status="ERROR", detail=f"{type(exc).__name__}: {exc}")
-        result["latency_ms"] = round((time.monotonic() - started) * 1000)
+        result.update(
+            status="ERROR",
+            detail=f"{type(exc).__name__}: {exc}",
+            latency_ms=round((time.monotonic() - started) * 1000),
+        )
         return result
 
     result["latency_ms"] = round((time.monotonic() - started) * 1000)
-
-    if msg is None:
-        result.update(status="TIMEOUT", detail=f"no response within {timeout}s")
-        return result
-    if msg.get("type") == "error":
-        result.update(status="ERROR", detail=msg.get("text", "")[:200])
-        return result
-
-    agents = msg.get("agents", [])
-    transfers = msg.get("transfers", [])
     result.update(
-        reply=msg.get("text", ""),
-        heard=msg.get("heard"),
-        agents=agents,
-        transfers=transfers,
-        tools=msg.get("tools", []),
-        agent_latency_ms=msg.get("latency_ms"),
+        reply=turn["reply"].strip(),
+        heard=turn["heard"].strip(),
+        agents=turn["agents"],
+        transfers=turn["transfers"],
+        tools=turn["tools"],
     )
 
-    reached = set(agents) | set(transfers)
-    if expected is None:
-        result["status"] = "PASS"
-    elif expected in reached:
+    if turn.get("error"):
+        result.update(status="ERROR", detail=turn["error"][:200])
+        return result
+    if turn.get("timeout"):
+        result.update(status="TIMEOUT", detail=f"no turnComplete within {timeout}s")
+        return result
+
+    reached = set(turn["agents"]) | set(turn["transfers"])
+    if expected is None or expected in reached:
         result["status"] = "PASS"
     elif not result["reply"]:
         result.update(status="FAIL", detail="empty reply")
@@ -209,7 +231,9 @@ async def main() -> int:
         counts[row["status"]] = counts.get(row["status"], 0) + 1
     print("  " + "   ".join(f"{k}={v}" for k, v in sorted(counts.items())))
 
-    timings = [r["latency_ms"] for r in rows if r["status"] in ("PASS", "ROUTED-ELSEWHERE")]
+    timings = [
+        r["latency_ms"] for r in rows if r["status"] in ("PASS", "ROUTED-ELSEWHERE")
+    ]
     if timings:
         timings.sort()
         p95 = timings[min(len(timings) - 1, int(len(timings) * 0.95))]

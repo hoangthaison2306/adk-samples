@@ -235,24 +235,32 @@ Set `GOOGLE_GENAI_MODEL` in `.env` to a Live model before using this mode, e.g.
 
 #### Voice front-end (`voice_bridge.py`)
 
-`adk web`'s streaming mode cannot drive `travel_concierge` directly. The agent
-routes to its sub-agents through `AgentTool`, and `AgentTool.run_async()` uses
-the **non-live** runner path, which needs a model exposing `generateContent`.
+`adk web`'s streaming mode cannot drive `travel_concierge`. The agent routes to
+its sub-agents through `AgentTool`, and `AgentTool.run_async()` takes the
+**non-live** runner path, which needs a model exposing `generateContent`.
 Native-audio Live models expose only `bidiGenerateContent`, so every sub-agent
-call in a live session fails.
+call inside a live session fails.
 
-`voice_bridge.py` works around that by splitting the two jobs across two models:
+`voice_bridge.py` is a port of [`bidi-demo/app/main.py`](../bidi-demo/app/main.py)
+with the attached agent swapped from `google_search_agent` to
+`travel_concierge`'s `root_agent`. The WebSocket protocol is unchanged, so
+bidi-demo's own frontend (`app.js`, `audio-recorder.js`, the PCM worklets) drives
+it as-is — the bridge serves those files rather than shipping a second copy:
 
 ```
-browser mic --(16kHz PCM)--> Live session (transcription only)
-        --transcript--> travel_concierge (text) --reply--> browser
+client -> server   binary frames = 16kHz mono 16-bit PCM
+                   text frames   = {"type": "text", "text": ...}
+server -> client   raw ADK Event JSON (exclude_none, by_alias)
 ```
 
-Speech-to-text runs on the Live model; the transcript is then fed into
-`travel_concierge`'s normal free-text entry point, so routing, sub-agents and
-tools are completely untouched.
+The live session holds a transcription-only gateway agent; each finished input
+transcription goes to `travel_concierge` through its ordinary free-text entry
+point, and its events are forwarded in the same shape the live events have.
+Routing, sub-agents and tools are untouched.
 
-Run it:
+Run it from the `travel-concierge` directory — its virtualenv already has
+`travel_concierge` and its dependencies, and bidi-demo's frontend is found
+through a relative path:
 
 ```bash
 # text model for travel_concierge
@@ -263,16 +271,20 @@ export VOICE_STT_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
 uv run uvicorn voice_bridge:app --port 8000
 ```
 
-Then open http://127.0.0.1:8000 — press **Call** to talk, or use the text box to
-send a typed question through the same path.
+Then open http://127.0.0.1:8000. On Windows PowerShell use
+`$env:GOOGLE_GENAI_MODEL="gemini-3.6-flash"` instead of `export`. Set
+`BIDI_STATIC_DIR` to serve a frontend from somewhere else.
 
-On Windows PowerShell use `$env:GOOGLE_GENAI_MODEL="gemini-3.6-flash"` instead
-of `export`.
+`travel_concierge` replies as text; the gateway agent's own audio is dropped so
+it cannot talk over the answer. Speaking the reply back would need a separate
+TTS pass and is not implemented.
 
 #### Acceptance harness (`harness.py`)
 
-`harness.py` drives sample questions through the bridge's WebSocket and checks,
-per question, which sub-agent handled it and how long the round trip took.
+`harness.py` drives sample questions through the bridge and checks, per question,
+which sub-agent handled it and how long the round trip took. It reads `author`
+and `actions.transferToAgent` off the event stream, so it verifies routing rather
+than just that *some* answer came back.
 
 ```bash
 uv run python harness.py                 # text mode (default)
@@ -280,9 +292,9 @@ uv run python harness.py --audio clips/  # full mic path; 01.wav..10.wav, 16kHz 
 uv run python harness.py --limit 3       # first N questions only
 ```
 
-It prints a PASS / ROUTED-ELSEWHERE / ERROR / TIMEOUT line per question plus
-median/p95/max latency, writes `harness_results.json`, and exits non-zero unless
-every question routed as expected.
+It prints PASS / ROUTED-ELSEWHERE / ERROR / TIMEOUT per question plus median/p95/max
+latency, writes `harness_results.json`, and exits non-zero unless every question
+routed as expected.
 
 ### Programmatic Access
 
