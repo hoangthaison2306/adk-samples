@@ -233,6 +233,57 @@ Set `GOOGLE_GENAI_MODEL` in `.env` to a Live model before using this mode, e.g.
 `gemini-live-2.5-flash-preview` for the ML Dev (API key) backend, or
 `gemini-2.0-flash-live-preview-04-09` for the Vertex AI backend.
 
+#### Voice front-end (`voice_bridge.py`)
+
+`adk web`'s streaming mode cannot drive `travel_concierge` directly. The agent
+routes to its sub-agents through `AgentTool`, and `AgentTool.run_async()` uses
+the **non-live** runner path, which needs a model exposing `generateContent`.
+Native-audio Live models expose only `bidiGenerateContent`, so every sub-agent
+call in a live session fails.
+
+`voice_bridge.py` works around that by splitting the two jobs across two models:
+
+```
+browser mic --(16kHz PCM)--> Live session (transcription only)
+        --transcript--> travel_concierge (text) --reply--> browser
+```
+
+Speech-to-text runs on the Live model; the transcript is then fed into
+`travel_concierge`'s normal free-text entry point, so routing, sub-agents and
+tools are completely untouched.
+
+Run it:
+
+```bash
+# text model for travel_concierge
+export GOOGLE_GENAI_MODEL=gemini-3.6-flash
+# Live model used only for transcription
+export VOICE_STT_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
+
+uv run uvicorn voice_bridge:app --port 8000
+```
+
+Then open http://127.0.0.1:8000 — press **Call** to talk, or use the text box to
+send a typed question through the same path.
+
+On Windows PowerShell use `$env:GOOGLE_GENAI_MODEL="gemini-3.6-flash"` instead
+of `export`.
+
+#### Acceptance harness (`harness.py`)
+
+`harness.py` drives sample questions through the bridge's WebSocket and checks,
+per question, which sub-agent handled it and how long the round trip took.
+
+```bash
+uv run python harness.py                 # text mode (default)
+uv run python harness.py --audio clips/  # full mic path; 01.wav..10.wav, 16kHz mono
+uv run python harness.py --limit 3       # first N questions only
+```
+
+It prints a PASS / ROUTED-ELSEWHERE / ERROR / TIMEOUT line per question plus
+median/p95/max latency, writes `harness_results.json`, and exits non-zero unless
+every question routed as expected.
+
 ### Programmatic Access
 
 Below is an example of interacting with the agent as a server using Python. 

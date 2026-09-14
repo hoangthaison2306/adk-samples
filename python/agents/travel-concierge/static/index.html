@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Travel Concierge — Voice</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 15px/1.5 system-ui, sans-serif; margin: 0; padding: 24px;
+           max-width: 760px; margin-inline: auto; }
+    h1 { font-size: 1.1rem; margin: 0 0 4px; }
+    .sub { opacity: .65; font-size: .85rem; margin-bottom: 20px; }
+    #log { border: 1px solid rgba(128,128,128,.35); border-radius: 8px;
+           padding: 12px; height: 60vh; overflow-y: auto; }
+    .turn { margin-bottom: 14px; }
+    .who { font-size: .72rem; text-transform: uppercase; letter-spacing: .06em;
+           opacity: .6; margin-bottom: 2px; }
+    .you .who { color: #2563eb; }
+    .bot .who { color: #059669; }
+    .err .who { color: #dc2626; }
+    .meta { font-size: .75rem; opacity: .6; margin-top: 3px; }
+    .partial { opacity: .5; font-style: italic; }
+    button { font: inherit; padding: 9px 18px; border-radius: 7px;
+             border: 1px solid rgba(128,128,128,.4); cursor: pointer;
+             background: transparent; }
+    button.live { background: #dc2626; color: #fff; border-color: #dc2626; }
+    .bar { display: flex; gap: 10px; align-items: center; margin-top: 14px; }
+    input { flex: 1; font: inherit; padding: 9px 12px; border-radius: 7px;
+            border: 1px solid rgba(128,128,128,.4); background: transparent;
+            color: inherit; }
+    #status { font-size: .8rem; opacity: .65; }
+  </style>
+</head>
+<body>
+  <h1>Travel Concierge — Voice</h1>
+  <div class="sub">Speak, or type to test routing without a mic.</div>
+  <div id="log"></div>
+  <div class="bar">
+    <button id="talk">Call</button>
+    <input id="text" placeholder="or type a question and press Enter" />
+  </div>
+  <div class="bar"><span id="status">connecting…</span></div>
+
+<script type="module">
+import { AudioRecorder } from "./audio-recorder.js";
+
+const log = document.getElementById("log");
+const statusEl = document.getElementById("status");
+const talk = document.getElementById("talk");
+const textIn = document.getElementById("text");
+
+const sessionId = Math.random().toString(36).slice(2, 10);
+const proto = location.protocol === "https:" ? "wss" : "ws";
+let ws, recorder = null, partialEl = null;
+
+function add(cls, who, body, meta) {
+  const el = document.createElement("div");
+  el.className = `turn ${cls}`;
+  el.innerHTML = `<div class="who"></div><div class="body"></div>`;
+  el.querySelector(".who").textContent = who;
+  el.querySelector(".body").textContent = body;
+  if (meta) {
+    const m = document.createElement("div");
+    m.className = "meta";
+    m.textContent = meta;
+    el.appendChild(m);
+  }
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+function connect() {
+  ws = new WebSocket(`${proto}://${location.host}/ws/${sessionId}`);
+  ws.onopen = () => (statusEl.textContent = "connected");
+  ws.onclose = () => {
+    statusEl.textContent = "disconnected — retrying in 2s";
+    setTimeout(connect, 2000);
+  };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === "partial_transcript") {
+      if (!partialEl) partialEl = add("you partial", "you", "");
+      partialEl.querySelector(".body").textContent += msg.text;
+    } else if (msg.type === "transcript") {
+      if (partialEl) { partialEl.remove(); partialEl = null; }
+      add("you", "you", msg.text);
+      statusEl.textContent = "thinking…";
+    } else if (msg.type === "response") {
+      const route = (msg.agents || []).join(" → ");
+      const bits = [];
+      if (route) bits.push(route);
+      if (msg.latency_ms) bits.push(`${msg.latency_ms}ms`);
+      add("bot", "concierge", msg.text, bits.join("  ·  "));
+      statusEl.textContent = "connected";
+    } else if (msg.type === "error") {
+      add("err", "error", msg.text);
+      statusEl.textContent = "connected";
+    } else if (msg.type === "stt_unavailable") {
+      add("err", "voice unavailable", msg.text);
+      statusEl.textContent = "typing only — voice unavailable";
+    }
+  };
+}
+connect();
+
+talk.onclick = async () => {
+  if (recorder) {
+    recorder.stop();
+    recorder = null;
+    talk.textContent = "Call";
+    talk.classList.remove("live");
+    statusEl.textContent = "connected";
+    return;
+  }
+  try {
+    recorder = new AudioRecorder((b64) =>
+      ws?.readyState === 1 &&
+      ws.send(JSON.stringify({ mime_type: "audio/pcm;rate=16000", data: b64 }))
+    );
+    await recorder.start();
+    talk.textContent = "Hang up";
+    talk.classList.add("live");
+    statusEl.textContent = "listening…";
+  } catch (err) {
+    recorder = null;
+    add("err", "mic", `${err.name}: ${err.message}`);
+  }
+};
+
+textIn.onkeydown = (e) => {
+  if (e.key !== "Enter" || !textIn.value.trim()) return;
+  const q = textIn.value.trim();
+  textIn.value = "";
+  add("you", "you", q);
+  statusEl.textContent = "thinking…";
+  ws.send(JSON.stringify({ mime_type: "text/plain", data: q }));
+};
+</script>
+</body>
+</html>
