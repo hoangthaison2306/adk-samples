@@ -39,7 +39,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from google.adk.agents import Agent
 from google.adk.agents.live_request_queue import LiveRequestQueue
@@ -59,6 +59,12 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+# Under `uvicorn voice_bridge:app` the server configures logging before this
+# module is imported, so basicConfig above is a no-op and the root logger stays
+# at WARNING -- which would hide every line below. Setting the level here works
+# either way: propagated records are filtered by the originating logger, not by
+# the root logger's level.
+logger.setLevel(logging.INFO)
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 APP_NAME = "travel-concierge-voice"
@@ -78,10 +84,20 @@ STATIC_DIR = Path(os.getenv("BIDI_STATIC_DIR", _DEFAULT_STATIC))
 
 app = FastAPI(title="travel-concierge voice bridge")
 
-if STATIC_DIR.is_dir():
+_INDEX = STATIC_DIR / "index.html"
+# Report a missing frontend at startup rather than as a 500 on the first page
+# load: the usual cause is an interrupted checkout, which is worth naming.
+if _INDEX.is_file():
+    logger.info("serving frontend from %s", STATIC_DIR)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 else:
-    logger.warning("frontend not found at %s; only /ws works", STATIC_DIR)
+    logger.error(
+        "frontend not found: %s does not exist. The WebSocket still works, so "
+        "harness.py can run, but the browser UI cannot be served. Expected "
+        "bidi-demo's frontend alongside this package; set BIDI_STATIC_DIR to "
+        "point elsewhere.",
+        _INDEX,
+    )
 
 session_service = InMemorySessionService()
 
@@ -110,7 +126,16 @@ text_runner = Runner(
 @app.get("/")
 async def root():
     """Serve bidi-demo's index.html."""
-    return FileResponse(STATIC_DIR / "index.html")
+    if not _INDEX.is_file():
+        return PlainTextResponse(
+            f"Frontend not found at {_INDEX}\n\n"
+            "bidi-demo's frontend is missing from this checkout. Restore it with:\n"
+            "    git checkout HEAD -- python/agents/bidi-demo/app/static\n\n"
+            "Or point BIDI_STATIC_DIR at a directory containing index.html.\n"
+            "The WebSocket endpoint works regardless, so harness.py can still run.",
+            status_code=503,
+        )
+    return FileResponse(_INDEX)
 
 
 # ========================================
