@@ -85,13 +85,14 @@ async def _collect_turn(ws, timeout: float) -> dict:
 
         event = json.loads(raw)
 
-        # The bridge's two non-Event messages.
-        if "error" in event:
-            out["error"] = event["error"]
-            return out
-        if "sttUnavailable" in event:
-            print(f"    ! STT unavailable: {event['sttUnavailable'][:120]}")
+        # Failures arrive as Events carrying errorCode/errorMessage.
+        code = event.get("errorCode")
+        if code == "STT_UNAVAILABLE":
+            print(f"    ! STT unavailable: {event.get('errorMessage', '')[:120]}")
             continue
+        if code:
+            out["error"] = f"{code}: {event.get('errorMessage', '')}"
+            return out
 
         author = event.get("author")
         if author and author not in out["agents"]:

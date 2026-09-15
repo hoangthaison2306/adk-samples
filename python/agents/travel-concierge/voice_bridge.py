@@ -212,6 +212,28 @@ async def websocket_endpoint(
             event.model_dump_json(exclude_none=True, by_alias=True)
         )
 
+    async def send_notice(code: str, exc: BaseException) -> None:
+        """Report a failure as an Event the frontend actually renders.
+
+        A bare {"error": ...} object parses fine in app.js and then renders
+        nothing -- it has no content, author or turnComplete -- so a real
+        failure reaches the user as silence. Carrying the message in a text
+        part puts it in a bubble; errorCode/errorMessage keep it machine
+        readable for the harness.
+        """
+        detail = f"{type(exc).__name__}: {exc}"
+        await send_event(
+            Event(
+                author="voice_bridge",
+                invocation_id="voice",
+                error_code=code,
+                error_message=detail,
+                content=types.Content(
+                    role="model", parts=[types.Part(text=f"[{code}] {detail}")]
+                ),
+            )
+        )
+
     async def ask_travel_concierge(question: str) -> None:
         """Feed one utterance into travel_concierge's free-text entry point.
 
@@ -231,9 +253,7 @@ async def websocket_endpoint(
         except Exception as exc:
             # Report and keep the socket open; one bad turn must not end the call.
             logger.exception("travel_concierge failed")
-            await websocket.send_text(
-                json.dumps({"error": f"{type(exc).__name__}: {exc}"})
-            )
+            await send_notice("AGENT_ERROR", exc)
         # run_async never sets turn_complete; the frontend needs it to close the
         # bubble and re-enable input.
         await send_event(
@@ -316,9 +336,10 @@ async def websocket_endpoint(
             raise
         except Exception as exc:
             logger.exception("live/STT stream failed")
-            await websocket.send_text(
-                json.dumps({"sttUnavailable": f"{type(exc).__name__}: {exc}"})
-            )
+            try:
+                await send_notice("STT_UNAVAILABLE", exc)
+            except Exception:  # client already gone; nothing left to tell
+                logger.debug("could not report STT failure", exc_info=True)
 
     upstream = asyncio.create_task(upstream_task())
     downstream = asyncio.create_task(guarded_downstream())
