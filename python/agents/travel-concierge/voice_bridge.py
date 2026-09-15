@@ -129,8 +129,12 @@ async def root():
     if not _INDEX.is_file():
         return PlainTextResponse(
             f"Frontend not found at {_INDEX}\n\n"
-            "bidi-demo's frontend is missing from this checkout. Restore it with:\n"
-            "    git checkout HEAD -- python/agents/bidi-demo/app/static\n\n"
+            "bidi-demo's frontend is missing from this checkout. Restore it with\n"
+            "(the :/ prefix makes the path root-relative, so this works from any\n"
+            "directory in the repo):\n\n"
+            "    git checkout HEAD -- :/python/agents/bidi-demo/app/static\n\n"
+            "Then RESTART this server. The /static mount is registered at startup\n"
+            "and was skipped, so the page would load without its scripts.\n\n"
             "Or point BIDI_STATIC_DIR at a directory containing index.html.\n"
             "The WebSocket endpoint works regardless, so harness.py can still run.",
             status_code=503,
