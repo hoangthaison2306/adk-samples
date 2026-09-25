@@ -182,7 +182,16 @@ async def main() -> int:
         type=Path,
         help="directory of 16kHz mono WAVs named 01.wav, 02.wav ... one per question",
     )
-    parser.add_argument("--timeout", type=float, default=90.0)
+    # Generous by default: on the free tier a single question can sit through
+    # several 429 backoffs before every sub-agent has had its turn.
+    parser.add_argument("--timeout", type=float, default=300.0)
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=15.0,
+        help="seconds to wait between questions, to let a per-minute quota "
+             "window clear (0 to go flat out)",
+    )
     parser.add_argument("--limit", type=int, help="only run the first N questions")
     args = parser.parse_args()
 
@@ -190,7 +199,10 @@ async def main() -> int:
     mode = "audio" if args.audio else "text"
 
     print(f"\ntravel_concierge voice harness - {mode} mode, {len(questions)} questions")
-    print(f"bridge: {args.url}\n")
+    print(f"bridge: {args.url}")
+    if args.delay:
+        print(f"pacing: {args.delay:.0f}s between questions")
+    print()
 
     rows = []
     for idx, (question, expected) in enumerate(questions, start=1):
@@ -205,6 +217,9 @@ async def main() -> int:
                     "latency_ms": 0,
                 })
                 continue
+
+        if args.delay and idx > 1:
+            await asyncio.sleep(args.delay)
 
         print(f"[{idx:2d}] {question}")
         row = await run_question(args.url, idx, question, expected, clip, args.timeout)

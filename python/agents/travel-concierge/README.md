@@ -279,6 +279,27 @@ Then open http://127.0.0.1:8000. On Windows PowerShell use
 it cannot talk over the answer. Speaking the reply back would need a separate
 TTS pass and is not implemented.
 
+#### Free-tier quota
+
+travel_concierge spreads one question across ~21 agents that all share a model,
+so a single turn can exceed the AI Studio free tier's 5 requests/minute and come
+back as `429 RESOURCE_EXHAUSTED`.
+
+ADK leaves `retry_options` unset, which the genai client reads as
+`stop_after_attempt(1)` -- no retry at all -- so a 429 ends the turn. The bridge
+therefore applies a retry policy to every model in the tree at startup; 429 is
+already in the SDK's default retriable set, alongside 408/500/502/503/504, and
+genuine errors like 400 still fail immediately. Tune it with:
+
+```bash
+export VOICE_RETRY_ATTEMPTS=6          # default
+export VOICE_RETRY_INITIAL_DELAY=8     # seconds, doubling to a 60s cap
+```
+
+Nothing about routing, instructions or tools changes -- only how the client
+behaves when the API pushes back. Expect a full 10-question acceptance run to
+take upwards of ten minutes on the free tier.
+
 #### Acceptance harness (`harness.py`)
 
 `harness.py` drives sample questions through the bridge and checks, per question,

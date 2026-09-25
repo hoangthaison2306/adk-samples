@@ -45,8 +45,10 @@ from google.adk.agents import Agent
 from google.adk.agents.live_request_queue import LiveRequestQueue
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.events import Event
+from google.adk.models import Gemini
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
+from google.adk.tools.agent_tool import AgentTool
 from google.genai import types
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -108,6 +110,57 @@ gateway_agent = Agent(
     model=STT_MODEL,
     description="Transcribes the traveler's speech.",
     instruction="Stay silent. Never speak, answer, or acknowledge. Say nothing.",
+)
+
+# travel_concierge spreads one question across ~21 agents that all share a
+# model, so a single turn can exceed the free tier's 5 requests/minute. ADK
+# leaves retry_options unset, which the genai client reads as
+# stop_after_attempt(1) -- no retry at all -- so a 429 ends the turn outright.
+# Enabling retries makes the SDK back off on 429 (and 408/500/502/503/504,
+# which are in its default retriable set).
+RETRY_ATTEMPTS = int(os.getenv("VOICE_RETRY_ATTEMPTS", "6"))
+RETRY_INITIAL_DELAY = float(os.getenv("VOICE_RETRY_INITIAL_DELAY", "8"))
+
+
+def _apply_retry_policy(agent: Agent) -> int:
+    """Give every model in the agent tree a retry policy. Returns the count.
+
+    Walks sub_agents and AgentTool-wrapped agents, swapping each bare model
+    name for a configured Gemini. Nothing about routing, instructions or tools
+    changes -- only how the client behaves when the API pushes back.
+    """
+    retry_options = types.HttpRetryOptions(
+        attempts=RETRY_ATTEMPTS,
+        initial_delay=RETRY_INITIAL_DELAY,
+        max_delay=60,
+        exp_base=2,
+        jitter=2,
+    )
+
+    seen: set[int] = set()
+
+    def walk(node: Agent) -> None:
+        if id(node) in seen:
+            return
+        seen.add(id(node))
+        if isinstance(node.model, str):
+            node.model = Gemini(model=node.model, retry_options=retry_options)
+        elif getattr(node.model, "retry_options", None) is None:
+            node.model.retry_options = retry_options
+        for sub in getattr(node, "sub_agents", None) or []:
+            walk(sub)
+        for tool in getattr(node, "tools", None) or []:
+            if isinstance(tool, AgentTool):
+                walk(tool.agent)
+
+    walk(agent)
+    return len(seen)
+
+
+_patched = _apply_retry_policy(root_agent)
+logger.info(
+    "retry policy on %d agents: %d attempts, %.0fs initial backoff",
+    _patched, RETRY_ATTEMPTS, RETRY_INITIAL_DELAY,
 )
 
 live_runner = Runner(
