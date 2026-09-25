@@ -233,3 +233,6 @@ client_secret*.json
 *credentials*.json
 *.pem
 *.key
+
+# travel-concierge voice harness output
+harness_results.json

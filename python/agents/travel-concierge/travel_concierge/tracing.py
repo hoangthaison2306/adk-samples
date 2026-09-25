@@ -12,10 +12,13 @@ load_dotenv()
 def instrument_adk_with_arize() -> trace.Tracer:
     """Instrument the ADK with Arize."""
 
-    if os.getenv("ARIZE_SPACE_ID") is None:
+    # Treat an empty value the same as an unset one: a blank ARIZE_SPACE_ID= in
+    # .env would otherwise pass an `is None` check and make register() raise,
+    # which fails the whole agent import for anyone not using Arize tracing.
+    if not os.getenv("ARIZE_SPACE_ID"):
         warnings.warn("ARIZE_SPACE_ID is not set", stacklevel=2)
         return None
-    if os.getenv("ARIZE_API_KEY") is None:
+    if not os.getenv("ARIZE_API_KEY"):
         warnings.warn("ARIZE_API_KEY is not set", stacklevel=2)
         return None
 
