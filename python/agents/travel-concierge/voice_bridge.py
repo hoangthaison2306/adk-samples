@@ -157,6 +157,11 @@ def _apply_retry_policy(agent: Agent) -> int:
     return len(seen)
 
 
+# The SDK logs every backoff through this logger at INFO ("Retrying ... in
+# 8.0 seconds"). Without it a quota-throttled turn just looks hung, with no
+# way to tell waiting apart from stuck.
+logging.getLogger("google_genai._api_client").setLevel(logging.INFO)
+
 _patched = _apply_retry_policy(root_agent)
 logger.info(
     "retry policy on %d agents: %d attempts, %.0fs initial backoff",
